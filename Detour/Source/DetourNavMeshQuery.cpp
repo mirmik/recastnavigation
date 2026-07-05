@@ -1864,7 +1864,12 @@ dtStatus dtNavMeshQuery::findStraightPath(const float* startPos, const float* en
 
 			unsigned char flags = 0;
 			dtPolyRef ref = path[i+1];
-			if (fromType == DT_POLYTYPE_LINEAR)
+			if (toType == DT_POLYTYPE_OFFMESH_CONNECTION)
+			{
+				flags = DT_STRAIGHTPATH_OFFMESH_CONNECTION;
+				ref = path[i+1];
+			}
+			else if (fromType == DT_POLYTYPE_LINEAR)
 			{
 				flags = DT_STRAIGHTPATH_LINEAR;
 				ref = path[i];
@@ -1874,12 +1879,6 @@ dtStatus dtNavMeshQuery::findStraightPath(const float* startPos, const float* en
 				flags = DT_STRAIGHTPATH_LINEAR;
 				ref = path[i+1];
 			}
-			else if (toType == DT_POLYTYPE_OFFMESH_CONNECTION)
-			{
-				flags = DT_STRAIGHTPATH_OFFMESH_CONNECTION;
-				ref = path[i+1];
-			}
-
 			if ((*straightPathCount) > 0 && dtVequal(&straightPath[((*straightPathCount)-1)*3], left))
 			{
 				if (flags && straightPathFlags)
@@ -2365,16 +2364,6 @@ dtStatus dtNavMeshQuery::getPortalPoints(dtPolyRef from, const dtPoly* fromPoly,
 	if (!link)
 		return DT_FAILURE | DT_INVALID_PARAM;
 
-	if (fromPoly->getType() == DT_POLYTYPE_LINEAR)
-	{
-		const float t = link->bmin / 255.0f;
-		const float* v0 = &fromTile->verts[fromPoly->verts[0]*3];
-		const float* v1 = &fromTile->verts[fromPoly->verts[1]*3];
-		dtVlerp(left, v0, v1, t);
-		dtVcopy(right, left);
-		return DT_SUCCESS;
-	}
-	
 	// Handle off-mesh connections.
 	if (fromPoly->getType() == DT_POLYTYPE_OFFMESH_CONNECTION)
 	{
@@ -2407,6 +2396,16 @@ dtStatus dtNavMeshQuery::getPortalPoints(dtPolyRef from, const dtPoly* fromPoly,
 		return DT_FAILURE | DT_INVALID_PARAM;
 	}
 
+	if (fromPoly->getType() == DT_POLYTYPE_LINEAR)
+	{
+		const float t = link->bmin / 255.0f;
+		const float* v0 = &fromTile->verts[fromPoly->verts[0]*3];
+		const float* v1 = &fromTile->verts[fromPoly->verts[1]*3];
+		dtVlerp(left, v0, v1, t);
+		dtVcopy(right, left);
+		return DT_SUCCESS;
+	}
+	
 	if (toPoly->getType() == DT_POLYTYPE_LINEAR)
 	{
 		const float t = link->bmax / 255.0f;
