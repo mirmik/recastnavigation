@@ -1854,7 +1854,17 @@ dtStatus dtNavMeshQuery::findStraightPath(const float* startPos, const float* en
 
 	if (hasLinear)
 	{
-		stat = appendVertex(closestStartPos, DT_STRAIGHTPATH_START, path[0],
+		unsigned char startFlags = DT_STRAIGHTPATH_START;
+		{
+			const dtMeshTile* tile = 0;
+			const dtPoly* poly = 0;
+			if (dtStatusFailed(m_nav->getTileAndPolyByRef(path[0], &tile, &poly)))
+				return DT_FAILURE | DT_INVALID_PARAM;
+			if (poly->getType() == DT_POLYTYPE_LINEAR)
+				startFlags |= DT_STRAIGHTPATH_LINEAR;
+		}
+
+		stat = appendVertex(closestStartPos, startFlags, path[0],
 							straightPath, straightPathFlags, straightPathRefs,
 							straightPathCount, maxStraightPath);
 		if (stat != DT_IN_PROGRESS)
@@ -1916,7 +1926,21 @@ dtStatus dtNavMeshQuery::findStraightPath(const float* startPos, const float* en
 				return stat;
 		}
 
-		appendVertex(closestEndPos, DT_STRAIGHTPATH_END, 0,
+		unsigned char endFlags = DT_STRAIGHTPATH_END;
+		dtPolyRef endRef = 0;
+		{
+			const dtMeshTile* tile = 0;
+			const dtPoly* poly = 0;
+			if (dtStatusFailed(m_nav->getTileAndPolyByRef(path[pathSize-1], &tile, &poly)))
+				return DT_FAILURE | DT_INVALID_PARAM;
+			if (poly->getType() == DT_POLYTYPE_LINEAR)
+			{
+				endFlags |= DT_STRAIGHTPATH_LINEAR;
+				endRef = path[pathSize-1];
+			}
+		}
+
+		appendVertex(closestEndPos, endFlags, endRef,
 					 straightPath, straightPathFlags, straightPathRefs,
 					 straightPathCount, maxStraightPath);
 
