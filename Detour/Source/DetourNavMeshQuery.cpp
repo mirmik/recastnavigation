@@ -27,6 +27,12 @@
 #include "DetourAssert.h"
 #include <new>
 
+static bool dtLinearStraightPathPointsColocated(const float* p0, const float* p1)
+{
+	static const float threshold = 0.01f * 0.01f;
+	return dtVdistSqr(p0, p1) < threshold;
+}
+
 /// @class dtQueryFilter
 ///
 /// <b>The Default Implementation</b>
@@ -1879,7 +1885,22 @@ dtStatus dtNavMeshQuery::findStraightPath(const float* startPos, const float* en
 				flags = DT_STRAIGHTPATH_LINEAR;
 				ref = path[i+1];
 			}
-			if ((*straightPathCount) > 0 && dtVequal(&straightPath[((*straightPathCount)-1)*3], left))
+			bool mergeWithPrevious = false;
+			if ((*straightPathCount) > 0)
+			{
+				const int previousIndex = (*straightPathCount)-1;
+				const float* previousPoint = &straightPath[previousIndex*3];
+				mergeWithPrevious = dtVequal(previousPoint, left);
+				if (!mergeWithPrevious &&
+					(flags & DT_STRAIGHTPATH_LINEAR) &&
+					straightPathFlags && straightPathRefs &&
+					(straightPathFlags[previousIndex] & DT_STRAIGHTPATH_LINEAR) &&
+					straightPathRefs[previousIndex] == ref)
+				{
+					mergeWithPrevious = dtLinearStraightPathPointsColocated(previousPoint, left);
+				}
+			}
+			if (mergeWithPrevious)
 			{
 				if (flags && straightPathFlags)
 					straightPathFlags[(*straightPathCount)-1] |= flags;
