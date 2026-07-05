@@ -172,7 +172,8 @@ static int createBVTree(dtNavMeshCreateParams* params, dtBVNode* nodes, int /*nn
 {
 	// Build tree
 	float quantFactor = 1 / params->cs;
-	BVItem* items = (BVItem*)dtAlloc(sizeof(BVItem)*params->polyCount, DT_ALLOC_TEMP);
+	const int nitems = params->polyCount + params->linearSegmentCount;
+	BVItem* items = (BVItem*)dtAlloc(sizeof(BVItem)*nitems, DT_ALLOC_TEMP);
 	for (int i = 0; i < params->polyCount; i++)
 	{
 		BVItem& it = items[i];
@@ -232,8 +233,31 @@ static int createBVTree(dtNavMeshCreateParams* params, dtBVNode* nodes, int /*nn
 		}
 	}
 	
+	for (int i = 0; i < params->linearSegmentCount; i++)
+	{
+		BVItem& it = items[params->polyCount + i];
+		it.i = params->polyCount + i;
+
+		const float* v0 = &params->linearSegmentVerts[i * 6];
+		const float* v1 = &params->linearSegmentVerts[i * 6 + 3];
+		float bmin[3], bmax[3];
+		dtVcopy(bmin, v0);
+		dtVcopy(bmax, v0);
+		dtVmin(bmin, v1);
+		dtVmax(bmax, v1);
+
+		// Give axis-aligned line segments a non-empty quantized extent so point queries can hit them.
+		it.bmin[0] = (unsigned short)dtClamp((int)((bmin[0] - params->bmin[0])*quantFactor), 0, 0xffff);
+		it.bmin[1] = (unsigned short)dtClamp((int)((bmin[1] - params->bmin[1])*quantFactor), 0, 0xffff);
+		it.bmin[2] = (unsigned short)dtClamp((int)((bmin[2] - params->bmin[2])*quantFactor), 0, 0xffff);
+
+		it.bmax[0] = (unsigned short)dtClamp((int)((bmax[0] - params->bmin[0])*quantFactor) + 1, 0, 0xffff);
+		it.bmax[1] = (unsigned short)dtClamp((int)((bmax[1] - params->bmin[1])*quantFactor) + 1, 0, 0xffff);
+		it.bmax[2] = (unsigned short)dtClamp((int)((bmax[2] - params->bmin[2])*quantFactor) + 1, 0, 0xffff);
+	}
+
 	int curNode = 0;
-	subdivide(items, params->polyCount, 0, params->polyCount, curNode, nodes);
+	subdivide(items, nitems, 0, nitems, curNode, nodes);
 	
 	dtFree(items);
 	
@@ -287,6 +311,15 @@ bool dtCreateNavMeshData(dtNavMeshCreateParams* params, unsigned char** outData,
 		return false;
 	if (!params->polyCount || !params->polys)
 		return false;
+	if (params->linearSegmentCount < 0 || params->linearLinkCount < 0)
+		return false;
+	if (params->linearSegmentCount > 0 &&
+		(!params->linearSegmentVerts || !params->linearSegmentFlags || !params->linearSegmentAreas))
+	{
+		return false;
+	}
+	if (params->linearLinkCount > 0 && !params->linearLinks)
+		return false;
 
 	const int nvp = params->nvp;
 	
@@ -325,6 +358,14 @@ bool dtCreateNavMeshData(dtNavMeshCreateParams* params, unsigned char** outData,
 				hmax = dtMax(hmax,h);
 			}
 		}
+		for (int i = 0; i < params->linearSegmentCount; ++i)
+		{
+			const float* v = &params->linearSegmentVerts[i*6];
+			hmin = dtMin(hmin, v[1]);
+			hmax = dtMax(hmax, v[1]);
+			hmin = dtMin(hmin, v[4]);
+			hmax = dtMax(hmax, v[4]);
+		}
 		hmin -= params->walkableClimb;
 		hmax += params->walkableClimb;
 		float bmin[3], bmax[3];
@@ -358,9 +399,11 @@ bool dtCreateNavMeshData(dtNavMeshCreateParams* params, unsigned char** outData,
 		}
 	}
 	
-	// Off-mesh connections are stored as polygons, adjust values.
-	const int totPolyCount = params->polyCount + storedOffMeshConCount;
-	const int totVertCount = params->vertCount + storedOffMeshConCount*2;
+	const int storedLinearSegmentCount = params->linearSegmentCount;
+
+	// Linear segments and off-mesh connections are stored as polygons, adjust values.
+	const int totPolyCount = params->polyCount + storedLinearSegmentCount + storedOffMeshConCount;
+	const int totVertCount = params->vertCount + storedLinearSegmentCount*2 + storedOffMeshConCount*2;
 	
 	// Find portal edges which are at tile borders.
 	int edgeCount = 0;
@@ -382,7 +425,15 @@ bool dtCreateNavMeshData(dtNavMeshCreateParams* params, unsigned char** outData,
 		}
 	}
 
-	const int maxLinkCount = edgeCount + portalCount*2 + offMeshConLinkCount*2;
+	int linearLinkCount = 0;
+	for (int i = 0; i < params->linearLinkCount; ++i)
+	{
+		linearLinkCount++;
+		if (params->linearLinks[i].flags & DT_LINEAR_LINK_BIDIR)
+			linearLinkCount++;
+	}
+
+	const int maxLinkCount = edgeCount + portalCount*2 + offMeshConLinkCount*2 + linearLinkCount;
 	
 	// Find unique detail vertices.
 	int uniqueDetailVertCount = 0;
@@ -431,12 +482,15 @@ bool dtCreateNavMeshData(dtNavMeshCreateParams* params, unsigned char** outData,
 	const int detailMeshesSize = dtAlign4(sizeof(dtPolyDetail)*params->polyCount);
 	const int detailVertsSize = dtAlign4(sizeof(float)*3*uniqueDetailVertCount);
 	const int detailTrisSize = dtAlign4(sizeof(unsigned char)*4*detailTriCount);
-	const int bvTreeSize = params->buildBvTree ? dtAlign4(sizeof(dtBVNode)*params->polyCount*2) : 0;
+	const int bvTreePolyCount = params->polyCount + storedLinearSegmentCount;
+	const int bvTreeSize = params->buildBvTree ? dtAlign4(sizeof(dtBVNode)*bvTreePolyCount*2) : 0;
+	const int linearSegmentsSize = dtAlign4(sizeof(dtLinearSegment)*storedLinearSegmentCount);
+	const int linearLinksSize = dtAlign4(sizeof(dtLinearLink)*params->linearLinkCount);
 	const int offMeshConsSize = dtAlign4(sizeof(dtOffMeshConnection)*storedOffMeshConCount);
 	
 	const int dataSize = headerSize + vertsSize + polysSize + linksSize +
 						 detailMeshesSize + detailVertsSize + detailTrisSize +
-						 bvTreeSize + offMeshConsSize;
+						 bvTreeSize + linearSegmentsSize + linearLinksSize + offMeshConsSize;
 						 
 	unsigned char* data = (unsigned char*)dtAlloc(sizeof(unsigned char)*dataSize, DT_ALLOC_PERM);
 	if (!data)
@@ -456,6 +510,8 @@ bool dtCreateNavMeshData(dtNavMeshCreateParams* params, unsigned char** outData,
 	float* navDVerts = dtGetThenAdvanceBufferPointer<float>(d, detailVertsSize);
 	unsigned char* navDTris = dtGetThenAdvanceBufferPointer<unsigned char>(d, detailTrisSize);
 	dtBVNode* navBvtree = dtGetThenAdvanceBufferPointer<dtBVNode>(d, bvTreeSize);
+	dtLinearSegment* linearSegments = dtGetThenAdvanceBufferPointer<dtLinearSegment>(d, linearSegmentsSize);
+	dtLinearLink* linearLinks = dtGetThenAdvanceBufferPointer<dtLinearLink>(d, linearLinksSize);
 	dtOffMeshConnection* offMeshCons = dtGetThenAdvanceBufferPointer<dtOffMeshConnection>(d, offMeshConsSize);
 	
 	
@@ -475,15 +531,20 @@ bool dtCreateNavMeshData(dtNavMeshCreateParams* params, unsigned char** outData,
 	header->detailVertCount = uniqueDetailVertCount;
 	header->detailTriCount = detailTriCount;
 	header->bvQuantFactor = 1.0f / params->cs;
-	header->offMeshBase = params->polyCount;
+	header->linearSegmentBase = params->polyCount;
+	header->linearSegmentCount = storedLinearSegmentCount;
+	header->linearLinkCount = params->linearLinkCount;
+	header->offMeshBase = params->polyCount + storedLinearSegmentCount;
 	header->walkableHeight = params->walkableHeight;
 	header->walkableRadius = params->walkableRadius;
 	header->walkableClimb = params->walkableClimb;
 	header->offMeshConCount = storedOffMeshConCount;
-	header->bvNodeCount = params->buildBvTree ? params->polyCount*2 : 0;
+	header->bvNodeCount = params->buildBvTree ? bvTreePolyCount*2 : 0;
 	
-	const int offMeshVertsBase = params->vertCount;
-	const int offMeshPolyBase = params->polyCount;
+	const int linearVertsBase = params->vertCount;
+	const int linearPolyBase = params->polyCount;
+	const int offMeshVertsBase = params->vertCount + storedLinearSegmentCount*2;
+	const int offMeshPolyBase = params->polyCount + storedLinearSegmentCount;
 	
 	// Store vertices
 	// Mesh vertices
@@ -494,6 +555,14 @@ bool dtCreateNavMeshData(dtNavMeshCreateParams* params, unsigned char** outData,
 		v[0] = params->bmin[0] + iv[0] * params->cs;
 		v[1] = params->bmin[1] + iv[1] * params->ch;
 		v[2] = params->bmin[2] + iv[2] * params->cs;
+	}
+	// Linear segment vertices.
+	for (int i = 0; i < storedLinearSegmentCount; ++i)
+	{
+		const float* segmentv = &params->linearSegmentVerts[i*6];
+		float* v = &navVerts[(linearVertsBase + i*2)*3];
+		dtVcopy(&v[0], &segmentv[0]);
+		dtVcopy(&v[3], &segmentv[3]);
 	}
 	// Off-mesh link vertices.
 	int n = 0;
@@ -547,7 +616,18 @@ bool dtCreateNavMeshData(dtNavMeshCreateParams* params, unsigned char** outData,
 			
 			p->vertCount++;
 		}
-		src += nvp*2;
+			src += nvp*2;
+	}
+	// Linear segment polys.
+	for (int i = 0; i < storedLinearSegmentCount; ++i)
+	{
+		dtPoly* p = &navPolys[linearPolyBase+i];
+		p->vertCount = 2;
+		p->verts[0] = (unsigned short)(linearVertsBase + i*2+0);
+		p->verts[1] = (unsigned short)(linearVertsBase + i*2+1);
+		p->flags = params->linearSegmentFlags[i];
+		p->setArea(params->linearSegmentAreas[i]);
+		p->setType(DT_POLYTYPE_LINEAR);
 	}
 	// Off-mesh connection vertices.
 	n = 0;
@@ -624,7 +704,23 @@ bool dtCreateNavMeshData(dtNavMeshCreateParams* params, unsigned char** outData,
 	// Store and create BVtree.
 	if (params->buildBvTree)
 	{
-		createBVTree(params, navBvtree, 2*params->polyCount);
+		createBVTree(params, navBvtree, 2*bvTreePolyCount);
+	}
+
+	// Store linear segments.
+	for (int i = 0; i < storedLinearSegmentCount; ++i)
+	{
+		dtLinearSegment* segment = &linearSegments[i];
+		segment->poly = (unsigned short)(linearPolyBase + i);
+		segment->userId = params->linearSegmentUserID ? params->linearSegmentUserID[i] : 0;
+		segment->flags = 0;
+		segment->reserved = 0;
+	}
+
+	// Store explicit linear links.
+	if (params->linearLinkCount > 0)
+	{
+		memcpy(linearLinks, params->linearLinks, sizeof(dtLinearLink)*params->linearLinkCount);
 	}
 	
 	// Store Off-Mesh connections.
@@ -685,6 +781,9 @@ bool dtNavMeshHeaderSwapEndian(unsigned char* data, const int /*dataSize*/)
 	dtSwapEndian(&header->detailVertCount);
 	dtSwapEndian(&header->detailTriCount);
 	dtSwapEndian(&header->bvNodeCount);
+	dtSwapEndian(&header->linearSegmentCount);
+	dtSwapEndian(&header->linearSegmentBase);
+	dtSwapEndian(&header->linearLinkCount);
 	dtSwapEndian(&header->offMeshConCount);
 	dtSwapEndian(&header->offMeshBase);
 	dtSwapEndian(&header->walkableHeight);
@@ -727,6 +826,8 @@ bool dtNavMeshDataSwapEndian(unsigned char* data, const int /*dataSize*/)
 	const int detailVertsSize = dtAlign4(sizeof(float)*3*header->detailVertCount);
 	const int detailTrisSize = dtAlign4(sizeof(unsigned char)*4*header->detailTriCount);
 	const int bvtreeSize = dtAlign4(sizeof(dtBVNode)*header->bvNodeCount);
+	const int linearSegmentsSize = dtAlign4(sizeof(dtLinearSegment)*header->linearSegmentCount);
+	const int linearLinksSize = dtAlign4(sizeof(dtLinearLink)*header->linearLinkCount);
 	const int offMeshLinksSize = dtAlign4(sizeof(dtOffMeshConnection)*header->offMeshConCount);
 	
 	unsigned char* d = data + headerSize;
@@ -739,6 +840,8 @@ bool dtNavMeshDataSwapEndian(unsigned char* data, const int /*dataSize*/)
 	d += detailTrisSize; // Ignore detail tris; single bytes can't be endian-swapped.
 	//unsigned char* detailTris = dtGetThenAdvanceBufferPointer<unsigned char>(d, detailTrisSize);
 	dtBVNode* bvTree = dtGetThenAdvanceBufferPointer<dtBVNode>(d, bvtreeSize);
+	dtLinearSegment* linearSegments = dtGetThenAdvanceBufferPointer<dtLinearSegment>(d, linearSegmentsSize);
+	dtLinearLink* linearLinks = dtGetThenAdvanceBufferPointer<dtLinearLink>(d, linearLinksSize);
 	dtOffMeshConnection* offMeshCons = dtGetThenAdvanceBufferPointer<dtOffMeshConnection>(d, offMeshLinksSize);
 	
 	// Vertices
@@ -786,6 +889,26 @@ bool dtNavMeshDataSwapEndian(unsigned char* data, const int /*dataSize*/)
 			dtSwapEndian(&node->bmax[j]);
 		}
 		dtSwapEndian(&node->i);
+	}
+
+	// Linear segments.
+	for (int i = 0; i < header->linearSegmentCount; ++i)
+	{
+		dtLinearSegment* segment = &linearSegments[i];
+		dtSwapEndian(&segment->poly);
+		dtSwapEndian(&segment->userId);
+		dtSwapEndian(&segment->flags);
+		dtSwapEndian(&segment->reserved);
+	}
+
+	// Linear links.
+	for (int i = 0; i < header->linearLinkCount; ++i)
+	{
+		dtLinearLink* link = &linearLinks[i];
+		dtSwapEndian(&link->fromPoly);
+		dtSwapEndian(&link->toPoly);
+		dtSwapEndian(&link->fromT);
+		dtSwapEndian(&link->toT);
 	}
 
 	// Off-mesh Connections.

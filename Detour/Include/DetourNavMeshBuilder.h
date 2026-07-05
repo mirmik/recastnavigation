@@ -20,6 +20,7 @@
 #define DETOURNAVMESHBUILDER_H
 
 #include "DetourAlloc.h"
+#include "DetourNavMesh.h"
 
 /// Represents the source data used to build an navigation mesh tile.
 /// @ingroup detour
@@ -74,6 +75,27 @@ struct dtNavMeshCreateParams
 	const unsigned int* offMeshConUserID;
 	/// The number of off-mesh connections. [Limit: >= 0]
 	int offMeshConCount;
+
+	/// @}
+	/// @name Linear Segment Attributes (Optional)
+	/// Used to define one-dimensional traversable path segments within the navigation graph.
+	/// @{
+
+	/// Linear segment vertices. [(ax, ay, az, bx, by, bz) * #linearSegmentCount] [Unit: wu]
+	const float* linearSegmentVerts;
+	/// User defined flags assigned to the linear segments. [Size: #linearSegmentCount]
+	const unsigned short* linearSegmentFlags;
+	/// User defined area ids assigned to the linear segments. [Size: #linearSegmentCount]
+	const unsigned char* linearSegmentAreas;
+	/// The user defined ids of the linear segments. [Size: #linearSegmentCount]
+	const unsigned int* linearSegmentUserID;
+	/// The number of linear segments. [Limit: >= 0]
+	int linearSegmentCount;
+
+	/// Explicit graph links between linear segment polygons. [Size: #linearLinkCount]
+	const dtLinearLink* linearLinks;
+	/// The number of linear links. [Limit: >= 0]
+	int linearLinkCount;
 
 	/// @}
 	/// @name Tile Attributes
@@ -146,4 +168,3 @@ function.
 @see dtCreateNavMeshData
 
 */
-

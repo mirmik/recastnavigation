@@ -544,6 +544,16 @@ dtStatus dtNavMeshQuery::closestPointOnPolyBoundary(dtPolyRef ref, const float* 
 
 	if (!pos || !dtVisfinite(pos) || !closest)
 		return DT_FAILURE | DT_INVALID_PARAM;
+
+	if (poly->getType() == DT_POLYTYPE_LINEAR)
+	{
+		const float* v0 = &tile->verts[poly->verts[0]*3];
+		const float* v1 = &tile->verts[poly->verts[1]*3];
+		float t;
+		dtDistancePtSegSqr2D(pos, v0, v1, t);
+		dtVlerp(closest, v0, v1, t);
+		return DT_SUCCESS;
+	}
 	
 	// Collect vertices.
 	float verts[DT_VERTS_PER_POLYGON*3];	
@@ -603,7 +613,8 @@ dtStatus dtNavMeshQuery::getPolyHeight(dtPolyRef ref, const float* pos, float* h
 	// We used to return success for offmesh connections, but the
 	// getPolyHeight in DetourNavMesh does not do this, so special
 	// case it here.
-	if (poly->getType() == DT_POLYTYPE_OFFMESH_CONNECTION)
+	if (poly->getType() == DT_POLYTYPE_OFFMESH_CONNECTION ||
+		poly->getType() == DT_POLYTYPE_LINEAR)
 	{
 		const float* v0 = &tile->verts[poly->verts[0]*3];
 		const float* v1 = &tile->verts[poly->verts[1]*3];
@@ -1820,6 +1831,77 @@ dtStatus dtNavMeshQuery::findStraightPath(const float* startPos, const float* en
 	float closestEndPos[3];
 	if (dtStatusFailed(closestPointOnPolyBoundary(path[pathSize-1], endPos, closestEndPos)))
 		return DT_FAILURE | DT_INVALID_PARAM;
+
+	bool hasLinear = false;
+	for (int i = 0; i < pathSize; ++i)
+	{
+		const dtMeshTile* tile = 0;
+		const dtPoly* poly = 0;
+		if (dtStatusFailed(m_nav->getTileAndPolyByRef(path[i], &tile, &poly)))
+			return DT_FAILURE | DT_INVALID_PARAM;
+		if (poly->getType() == DT_POLYTYPE_LINEAR)
+		{
+			hasLinear = true;
+			break;
+		}
+	}
+
+	if (hasLinear)
+	{
+		stat = appendVertex(closestStartPos, DT_STRAIGHTPATH_START, path[0],
+							straightPath, straightPathFlags, straightPathRefs,
+							straightPathCount, maxStraightPath);
+		if (stat != DT_IN_PROGRESS)
+			return stat;
+
+		for (int i = 0; i+1 < pathSize; ++i)
+		{
+			float left[3], right[3];
+			unsigned char fromType;
+			unsigned char toType;
+			if (dtStatusFailed(getPortalPoints(path[i], path[i+1], left, right, fromType, toType)))
+				return DT_FAILURE | DT_INVALID_PARAM;
+
+			unsigned char flags = 0;
+			dtPolyRef ref = path[i+1];
+			if (fromType == DT_POLYTYPE_LINEAR)
+			{
+				flags = DT_STRAIGHTPATH_LINEAR;
+				ref = path[i];
+			}
+			else if (toType == DT_POLYTYPE_LINEAR)
+			{
+				flags = DT_STRAIGHTPATH_LINEAR;
+				ref = path[i+1];
+			}
+			else if (toType == DT_POLYTYPE_OFFMESH_CONNECTION)
+			{
+				flags = DT_STRAIGHTPATH_OFFMESH_CONNECTION;
+				ref = path[i+1];
+			}
+
+			if ((*straightPathCount) > 0 && dtVequal(&straightPath[((*straightPathCount)-1)*3], left))
+			{
+				if (flags && straightPathFlags)
+					straightPathFlags[(*straightPathCount)-1] |= flags;
+				if (ref && straightPathRefs)
+					straightPathRefs[(*straightPathCount)-1] = ref;
+				continue;
+			}
+
+			stat = appendVertex(left, flags, ref,
+								straightPath, straightPathFlags, straightPathRefs,
+								straightPathCount, maxStraightPath);
+			if (stat != DT_IN_PROGRESS)
+				return stat;
+		}
+
+		appendVertex(closestEndPos, DT_STRAIGHTPATH_END, 0,
+					 straightPath, straightPathFlags, straightPathRefs,
+					 straightPathCount, maxStraightPath);
+
+		return DT_SUCCESS | ((*straightPathCount >= maxStraightPath) ? DT_BUFFER_TOO_SMALL : 0);
+	}
 	
 	// Add start point.
 	stat = appendVertex(closestStartPos, DT_STRAIGHTPATH_START, path[0],
@@ -2282,6 +2364,16 @@ dtStatus dtNavMeshQuery::getPortalPoints(dtPolyRef from, const dtPoly* fromPoly,
 	}
 	if (!link)
 		return DT_FAILURE | DT_INVALID_PARAM;
+
+	if (fromPoly->getType() == DT_POLYTYPE_LINEAR)
+	{
+		const float t = link->bmin / 255.0f;
+		const float* v0 = &fromTile->verts[fromPoly->verts[0]*3];
+		const float* v1 = &fromTile->verts[fromPoly->verts[1]*3];
+		dtVlerp(left, v0, v1, t);
+		dtVcopy(right, left);
+		return DT_SUCCESS;
+	}
 	
 	// Handle off-mesh connections.
 	if (fromPoly->getType() == DT_POLYTYPE_OFFMESH_CONNECTION)
@@ -2313,6 +2405,16 @@ dtStatus dtNavMeshQuery::getPortalPoints(dtPolyRef from, const dtPoly* fromPoly,
 			}
 		}
 		return DT_FAILURE | DT_INVALID_PARAM;
+	}
+
+	if (toPoly->getType() == DT_POLYTYPE_LINEAR)
+	{
+		const float t = link->bmax / 255.0f;
+		const float* v0 = &toTile->verts[toPoly->verts[0]*3];
+		const float* v1 = &toTile->verts[toPoly->verts[1]*3];
+		dtVlerp(left, v0, v1, t);
+		dtVcopy(right, left);
+		return DT_SUCCESS;
 	}
 	
 	// Find portal vertices.

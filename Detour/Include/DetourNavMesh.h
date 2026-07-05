@@ -70,7 +70,7 @@ static const int DT_VERTS_PER_POLYGON = 6;
 static const int DT_NAVMESH_MAGIC = 'D'<<24 | 'N'<<16 | 'A'<<8 | 'V';
 
 /// A version number used to detect compatibility of navigation tile data.
-static const int DT_NAVMESH_VERSION = 7;
+static const int DT_NAVMESH_VERSION = 8;
 
 /// A magic number used to detect the compatibility of navigation tile states.
 static const int DT_NAVMESH_STATE_MAGIC = 'D'<<24 | 'N'<<16 | 'M'<<8 | 'S';
@@ -90,6 +90,9 @@ static const unsigned int DT_NULL_LINK = 0xffffffff;
 /// A flag that indicates that an off-mesh connection can be traversed in both directions. (Is bidirectional.)
 static const unsigned int DT_OFFMESH_CON_BIDIR = 1;
 
+/// A flag that indicates that a linear path link can be traversed in both directions.
+static const unsigned int DT_LINEAR_LINK_BIDIR = 1;
+
 /// The maximum number of user defined area ids.
 /// @ingroup detour
 static const int DT_MAX_AREAS = 64;
@@ -107,7 +110,8 @@ enum dtStraightPathFlags
 {
 	DT_STRAIGHTPATH_START = 0x01,				///< The vertex is the start position in the path.
 	DT_STRAIGHTPATH_END = 0x02,					///< The vertex is the end position in the path.
-	DT_STRAIGHTPATH_OFFMESH_CONNECTION = 0x04	///< The vertex is the start of an off-mesh connection.
+	DT_STRAIGHTPATH_OFFMESH_CONNECTION = 0x04,	///< The vertex is the start of an off-mesh connection.
+	DT_STRAIGHTPATH_LINEAR = 0x08				///< The vertex is part of a linear path segment.
 };
 
 /// Options for dtNavMeshQuery::findStraightPath.
@@ -146,7 +150,9 @@ enum dtPolyTypes
 	/// The polygon is a standard convex polygon that is part of the surface of the mesh.
 	DT_POLYTYPE_GROUND = 0,
 	/// The polygon is an off-mesh connection consisting of two vertices.
-	DT_POLYTYPE_OFFMESH_CONNECTION = 1
+	DT_POLYTYPE_OFFMESH_CONNECTION = 1,
+	/// The polygon is a one-dimensional traversable segment consisting of two vertices.
+	DT_POLYTYPE_LINEAR = 2
 };
 
 
@@ -244,6 +250,44 @@ struct dtOffMeshConnection
 	unsigned int userId;
 };
 
+/// Defines a one-dimensional traversable segment within a dtMeshTile object.
+struct dtLinearSegment
+{
+	/// The polygon reference of the segment within the tile.
+	unsigned short poly;
+
+	/// The id of the linear segment. (User assigned when the navigation mesh is built.)
+	unsigned int userId;
+
+	/// User reserved flags for future segment-specific options.
+	unsigned short flags;
+
+	/// Reserved for future use.
+	unsigned short reserved;
+};
+
+/// Defines explicit graph adjacency between linear path polygons.
+struct dtLinearLink
+{
+	/// Source polygon index within the tile.
+	unsigned short fromPoly;
+
+	/// Destination polygon index within the tile.
+	unsigned short toPoly;
+
+	/// Source parametric position along the source segment. [0, 65535]
+	unsigned short fromT;
+
+	/// Destination parametric position along the destination segment. [0, 65535]
+	unsigned short toT;
+
+	/// Link flags. See #DT_LINEAR_LINK_BIDIR.
+	unsigned char flags;
+
+	/// Reserved for future use.
+	unsigned char reserved[3];
+};
+
 /// Provides high level information related to a dtMeshTile object.
 /// @ingroup detour
 struct dtMeshHeader
@@ -264,6 +308,9 @@ struct dtMeshHeader
 	
 	int detailTriCount;			///< The number of triangles in the detail mesh.
 	int bvNodeCount;			///< The number of bounding volume nodes. (Zero if bounding volumes are disabled.)
+	int linearSegmentCount;		///< The number of linear path segments.
+	int linearSegmentBase;		///< The index of the first polygon which is a linear path segment.
+	int linearLinkCount;			///< The number of explicit linear path links.
 	int offMeshConCount;		///< The number of off-mesh connections.
 	int offMeshBase;			///< The index of the first polygon which is an off-mesh connection.
 	float walkableHeight;		///< The height of the agents using the tile.
@@ -299,6 +346,9 @@ struct dtMeshTile
 	/// The tile bounding volume nodes. [Size: dtMeshHeader::bvNodeCount]
 	/// (Will be null if bounding volumes are disabled.)
 	dtBVNode* bvTree;
+
+	dtLinearSegment* linearSegments;	///< The tile linear segments. [Size: dtMeshHeader::linearSegmentCount]
+	dtLinearLink* linearLinks;		///< The tile explicit linear links. [Size: dtMeshHeader::linearLinkCount]
 
 	dtOffMeshConnection* offMeshCons;		///< The tile off-mesh connections. [Size: dtMeshHeader::offMeshConCount]
 		
@@ -462,6 +512,11 @@ public:
 	///  @param[in]	ref		The polygon reference of the off-mesh connection.
 	/// @return The specified off-mesh connection, or null if the polygon reference is not valid.
 	const dtOffMeshConnection* getOffMeshConnectionByRef(dtPolyRef ref) const;
+
+	/// Gets the specified linear segment.
+	///  @param[in]	ref		The polygon reference of the linear segment.
+	/// @return The specified linear segment, or null if the polygon reference is not valid.
+	const dtLinearSegment* getLinearSegmentByRef(dtPolyRef ref) const;
 	
 	/// @}
 
@@ -626,8 +681,11 @@ private:
 							const dtMeshTile* tile, int side,
 							dtPolyRef* con, float* conarea, int maxcon) const;
 	
-	/// Builds internal polygons links for a tile.
-	void connectIntLinks(dtMeshTile* tile);
+		/// Builds internal polygons links for a tile.
+		void connectIntLinks(dtMeshTile* tile);
+
+		/// Builds explicit links between linear path polygons.
+		void connectLinearLinks(dtMeshTile* tile);
 	/// Builds internal polygons links for a tile.
 	void baseOffMeshLinks(dtMeshTile* tile);
 

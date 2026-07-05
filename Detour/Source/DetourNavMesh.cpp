@@ -536,7 +536,8 @@ void dtNavMesh::connectIntLinks(dtMeshTile* tile)
 		dtPoly* poly = &tile->polys[i];
 		poly->firstLink = DT_NULL_LINK;
 
-		if (poly->getType() == DT_POLYTYPE_OFFMESH_CONNECTION)
+		if (poly->getType() == DT_POLYTYPE_OFFMESH_CONNECTION ||
+			poly->getType() == DT_POLYTYPE_LINEAR)
 			continue;
 			
 		// Build edge links backwards so that the links will be
@@ -559,6 +560,54 @@ void dtNavMesh::connectIntLinks(dtMeshTile* tile)
 				poly->firstLink = idx;
 			}
 		}			
+	}
+}
+
+void dtNavMesh::connectLinearLinks(dtMeshTile* tile)
+{
+	if (!tile) return;
+
+	const dtPolyRef base = getPolyRefBase(tile);
+
+	for (int i = 0; i < tile->header->linearLinkCount; ++i)
+	{
+		const dtLinearLink* source = &tile->linearLinks[i];
+		if (source->fromPoly >= tile->header->polyCount || source->toPoly >= tile->header->polyCount)
+			continue;
+
+		dtPoly* fromPoly = &tile->polys[source->fromPoly];
+		dtPoly* toPoly = &tile->polys[source->toPoly];
+		if (fromPoly->getType() != DT_POLYTYPE_LINEAR || toPoly->getType() != DT_POLYTYPE_LINEAR)
+			continue;
+
+		unsigned int idx = allocLink(tile);
+		if (idx != DT_NULL_LINK)
+		{
+			dtLink* link = &tile->links[idx];
+			link->ref = base | (dtPolyRef)source->toPoly;
+			link->edge = 0xff;
+			link->side = 0xfe;
+			link->bmin = (unsigned char)(source->fromT / 257);
+			link->bmax = (unsigned char)(source->toT / 257);
+			link->next = fromPoly->firstLink;
+			fromPoly->firstLink = idx;
+		}
+
+		if (source->flags & DT_LINEAR_LINK_BIDIR)
+		{
+			unsigned int ridx = allocLink(tile);
+			if (ridx != DT_NULL_LINK)
+			{
+				dtLink* link = &tile->links[ridx];
+				link->ref = base | (dtPolyRef)source->fromPoly;
+				link->edge = 0xff;
+				link->side = 0xfe;
+				link->bmin = (unsigned char)(source->toT / 257);
+				link->bmax = (unsigned char)(source->fromT / 257);
+				link->next = toPoly->firstLink;
+				toPoly->firstLink = ridx;
+			}
+		}
 	}
 }
 
@@ -687,6 +736,17 @@ bool dtNavMesh::getPolyHeight(const dtMeshTile* tile, const dtPoly* poly, const 
 	if (poly->getType() == DT_POLYTYPE_OFFMESH_CONNECTION)
 		return false;
 
+	if (poly->getType() == DT_POLYTYPE_LINEAR)
+	{
+		const float* v0 = &tile->verts[poly->verts[0]*3];
+		const float* v1 = &tile->verts[poly->verts[1]*3];
+		float t;
+		dtDistancePtSegSqr2D(pos, v0, v1, t);
+		if (height)
+			*height = v0[1] + (v1[1] - v0[1])*t;
+		return true;
+	}
+
 	const unsigned int ip = (unsigned int)(poly - tile->polys);
 	const dtPolyDetail* pd = &tile->detailMeshes[ip];
 	
@@ -737,6 +797,20 @@ void dtNavMesh::closestPointOnPoly(dtPolyRef ref, const float* pos, float* close
 	const dtPoly* poly = 0;
 	getTileAndPolyByRefUnsafe(ref, &tile, &poly);
 
+	// Off-mesh connections and linear segments don't have detail polygons.
+	if (poly->getType() == DT_POLYTYPE_OFFMESH_CONNECTION ||
+		poly->getType() == DT_POLYTYPE_LINEAR)
+	{
+		const float* v0 = &tile->verts[poly->verts[0]*3];
+		const float* v1 = &tile->verts[poly->verts[1]*3];
+		float t;
+		const float distSqr = dtDistancePtSegSqr2D(pos, v0, v1, t);
+		dtVlerp(closest, v0, v1, t);
+		if (posOverPoly)
+			*posOverPoly = poly->getType() == DT_POLYTYPE_LINEAR && distSqr <= dtSqr(0.001f);
+		return;
+	}
+
 	dtVcopy(closest, pos);
 	if (getPolyHeight(tile, poly, pos, &closest[1]))
 	{
@@ -747,17 +821,6 @@ void dtNavMesh::closestPointOnPoly(dtPolyRef ref, const float* pos, float* close
 
 	if (posOverPoly)
 		*posOverPoly = false;
-
-	// Off-mesh connections don't have detail polygons.
-	if (poly->getType() == DT_POLYTYPE_OFFMESH_CONNECTION)
-	{
-		const float* v0 = &tile->verts[poly->verts[0]*3];
-		const float* v1 = &tile->verts[poly->verts[1]*3];
-		float t;
-		dtDistancePtSegSqr2D(pos, v0, v1, t);
-		dtVlerp(closest, v0, v1, t);
-		return;
-	}
 
 	// Outside poly that is not an offmesh connection.
 	closestPointOnDetailEdges(tile, poly, pos, closest, true);
@@ -989,6 +1052,8 @@ dtStatus dtNavMesh::addTile(unsigned char* data, int dataSize, int flags,
 	const int detailVertsSize = dtAlign4(sizeof(float)*3*header->detailVertCount);
 	const int detailTrisSize = dtAlign4(sizeof(unsigned char)*4*header->detailTriCount);
 	const int bvtreeSize = dtAlign4(sizeof(dtBVNode)*header->bvNodeCount);
+	const int linearSegmentsSize = dtAlign4(sizeof(dtLinearSegment)*header->linearSegmentCount);
+	const int linearLinksSize = dtAlign4(sizeof(dtLinearLink)*header->linearLinkCount);
 	const int offMeshLinksSize = dtAlign4(sizeof(dtOffMeshConnection)*header->offMeshConCount);
 	
 	unsigned char* d = data + headerSize;
@@ -999,11 +1064,17 @@ dtStatus dtNavMesh::addTile(unsigned char* data, int dataSize, int flags,
 	tile->detailVerts = dtGetThenAdvanceBufferPointer<float>(d, detailVertsSize);
 	tile->detailTris = dtGetThenAdvanceBufferPointer<unsigned char>(d, detailTrisSize);
 	tile->bvTree = dtGetThenAdvanceBufferPointer<dtBVNode>(d, bvtreeSize);
+	tile->linearSegments = dtGetThenAdvanceBufferPointer<dtLinearSegment>(d, linearSegmentsSize);
+	tile->linearLinks = dtGetThenAdvanceBufferPointer<dtLinearLink>(d, linearLinksSize);
 	tile->offMeshCons = dtGetThenAdvanceBufferPointer<dtOffMeshConnection>(d, offMeshLinksSize);
 
 	// If there are no items in the bvtree, reset the tree pointer.
 	if (!bvtreeSize)
 		tile->bvTree = 0;
+	if (!linearSegmentsSize)
+		tile->linearSegments = 0;
+	if (!linearLinksSize)
+		tile->linearLinks = 0;
 
 	// Build links freelist
 	tile->linksFreeList = 0;
@@ -1018,6 +1089,7 @@ dtStatus dtNavMesh::addTile(unsigned char* data, int dataSize, int flags,
 	tile->flags = flags;
 
 	connectIntLinks(tile);
+	connectLinearLinks(tile);
 
 	// Base off-mesh connections to their starting polygons and connect connections inside the tile.
 	baseOffMeshLinks(tile);
@@ -1320,6 +1392,8 @@ dtStatus dtNavMesh::removeTile(dtTileRef ref, unsigned char** data, int* dataSiz
 	tile->detailVerts = 0;
 	tile->detailTris = 0;
 	tile->bvTree = 0;
+	tile->linearSegments = 0;
+	tile->linearLinks = 0;
 	tile->offMeshCons = 0;
 
 	// Update salt, salt should never be zero.
@@ -1529,6 +1603,28 @@ const dtOffMeshConnection* dtNavMesh::getOffMeshConnectionByRef(dtPolyRef ref) c
 	return &tile->offMeshCons[idx];
 }
 
+const dtLinearSegment* dtNavMesh::getLinearSegmentByRef(dtPolyRef ref) const
+{
+	unsigned int salt, it, ip;
+
+	if (!ref)
+		return 0;
+
+	decodePolyId(ref, salt, it, ip);
+	if (it >= (unsigned int)m_maxTiles) return 0;
+	if (m_tiles[it].salt != salt || m_tiles[it].header == 0) return 0;
+	const dtMeshTile* tile = &m_tiles[it];
+	if (ip >= (unsigned int)tile->header->polyCount) return 0;
+	const dtPoly* poly = &tile->polys[ip];
+
+	if (poly->getType() != DT_POLYTYPE_LINEAR)
+		return 0;
+
+	const unsigned int idx = ip - tile->header->linearSegmentBase;
+	dtAssert(idx < (unsigned int)tile->header->linearSegmentCount);
+	return &tile->linearSegments[idx];
+}
+
 
 dtStatus dtNavMesh::setPolyFlags(dtPolyRef ref, unsigned short flags)
 {
@@ -1594,4 +1690,3 @@ dtStatus dtNavMesh::getPolyArea(dtPolyRef ref, unsigned char* resultArea) const
 	
 	return DT_SUCCESS;
 }
-
